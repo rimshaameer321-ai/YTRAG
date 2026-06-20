@@ -1,0 +1,3 @@
+Machine Learning (ML) is a branch of Artificial Intelligence that enables computers to learn patterns from data and make decisions or predictions without being explicitly programmed for every task. In programming basics of machine learning, the focus is on understanding how data is used to train models and how these models improve their performance over time.
+
+The process of machine learning typically starts with collecting data. This data is then cleaned and prepared because real-world data often contains errors, missing values, or irrelevant information. After preprocessing, the data is divided into two parts: training data and testing data. The training data is used to teach the model, while the testing data is used to evaluate how well the model has learned.

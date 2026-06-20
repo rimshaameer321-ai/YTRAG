@@ -1,0 +1,11 @@
+Python is a high-level, easy-to-learn programming language created by Guido van Rossum. It is widely used for web development, artificial intelligence, data science, automation, game development, and software applications.
+
+Python is popular because of its simple syntax, readability, and powerful libraries. Beginners can easily understand and write Python code compared to many other programming languages.
+
+Features of Python
+Simple and easy syntax
+Free and open-source
+Platform independent
+Supports object-oriented programming
+Large collection of libraries
+Used in AI, Machine Learning, and Web Development

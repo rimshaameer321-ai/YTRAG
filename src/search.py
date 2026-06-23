@@ -34,11 +34,45 @@ class RAGSearch:
         from other users.
         """
         results = self.vectorstore.query(query, top_k=top_k, user_id=user_id)
+
+        # DEBUG: show exactly which chunks (and which document_id they
+        # came from) are about to be sent to the LLM. This makes it easy
+        # to catch cases where deleted/foreign content is still leaking
+        # into the context.
+        print(f"[DEBUG] search_and_summarize: {len(results)} chunk(s) matched for user={user_id}")
+        for r in results:
+            meta = r.get("metadata", {}) or {}
+            print(
+                f"[DEBUG]   -> document_id={meta.get('document_id')} "
+                f"filename={meta.get('filename')} "
+                f"distance={r.get('distance')}"
+            )
+
         texts = [r["metadata"].get("text", "") for r in results if r["metadata"]]
         context = "\n\n".join(texts)
-        if not context:
+
+        if not context.strip():
             return "No relevant documents found."
-        prompt = f"""Summarize the following context for the query: '{query}'\n\nContext:\n{context}\n\nSummary:"""
+
+        # IMPORTANT: explicitly instruct the model to answer ONLY from the
+        # provided context, and to say so plainly if the context doesn't
+        # contain the answer. Without this, the model tends to blend in
+        # its own general/pretrained knowledge on common topics (e.g.
+        # "cartesian space" in robotics) even when the retrieved context
+        # is empty, irrelevant, or only weakly related — making it look
+        # like deleted/foreign documents are still being searched, when
+        # in fact the model is just answering from memory.
+        prompt = f"""You are answering ONLY using the context below, which comes from documents the user has uploaded. Do not use any outside knowledge.
+
+If the context does not contain information relevant to the query, respond with exactly: "I couldn't find anything about that in your documents."
+
+Context:
+{context}
+
+Query: '{query}'
+
+Answer (based only on the context above):"""
+
         response = self.llm.invoke([prompt])
         return response.content
 

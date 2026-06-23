@@ -1,36 +1,80 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import SearchBar from './components/SearchBar';
+import { FileText, Trash2, User } from 'lucide-react';
+import SearchBar, { AttachedDocument } from './components/SearchBar';
 import ResponseDisplay from './components/ResponseDisplay';
 import LoadingAnimation from './components/LoadingAnimation';
+import AuthPage from './AuthPage';
+import DocumentManager from './DocumentManager';
+import ProfileModal from './ProfileModal';
+import { supabase } from './supabaseClient';
+import type { Session } from '@supabase/supabase-js';
 
 interface Message {
   query: string;
   response: string;
+  attachment: AttachedDocument | null;
 }
 
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isDocManagerOpen, setIsDocManagerOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Har nayi message ke baad neeche scroll karo
+  const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setSession(session);
+
+      // onAuthStateChange fires on many events, not just login/logout —
+      // e.g. TOKEN_REFRESHED fires automatically when the access token is
+      // silently refreshed (this happens when you switch back to the tab).
+      // Only clear the chat on a real sign-in or sign-out, never on a
+      // background token refresh.
+      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+        setMessages([]);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
   useEffect(() => {
     if (bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, loading]);
 
-  const handleSearch = async (searchQuery: string) => {
+  const handleSearch = async (searchQuery: string, attachment: AttachedDocument | null) => {
     setLoading(true);
     setError('');
 
     try {
-      const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
       const res = await fetch(`${apiUrl}/search`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({ query: searchQuery, top_k: 5 }),
       });
 
@@ -38,8 +82,7 @@ export default function App() {
 
       const data = await res.json();
 
-      // Purana answer rehta hai — naya add hota hai
-      setMessages(prev => [...prev, { query: searchQuery, response: data.summary }]);
+      setMessages(prev => [...prev, { query: searchQuery, response: data.summary, attachment }]);
 
     } catch (err) {
       setError('Backend not reachable. Make sure FastAPI is running on http://localhost:8000');
@@ -48,10 +91,48 @@ export default function App() {
     }
   };
 
+  const handleDeleteAttachment = async (documentId: string) => {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      if (!token) return;
+
+      await fetch(`${apiUrl}/documents/${documentId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err) {
+      // Ignore network errors here — we still clear it from the UI below
+    } finally {
+      removeAttachmentFromMessages(documentId);
+    }
+  };
+
+  const removeAttachmentFromMessages = (documentId: string) => {
+    setMessages(prev =>
+      prev.map(msg =>
+        msg.attachment?.document_id === documentId
+          ? { ...msg, attachment: null }
+          : msg
+      )
+    );
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-slate-900 flex items-center justify-center">
+        <p className="text-purple-300">Loading...</p>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <AuthPage onAuthSuccess={() => {}} />;
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-slate-900">
 
-      {/* Nav */}
       <nav className="bg-slate-900/50 backdrop-blur-md border-b border-purple-500/20 sticky top-0 z-50">
         <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -59,13 +140,28 @@ export default function App() {
               <span className="text-white font-bold">RAG</span>
             </div>
           </div>
-          <p className="text-purple-300 text-sm">AI-Powered Document Search</p>
+          <div className="flex items-center gap-3">
+            <p className="text-purple-300 text-sm">AI-Powered Document Search</p>
+            <button
+              onClick={() => setIsDocManagerOpen(true)}
+              className="text-sm text-purple-300 border border-purple-500/30 rounded-lg px-3 py-1.5 hover:bg-purple-500/10"
+            >
+              Your Docs
+            </button>
+            <button
+              onClick={() => setIsProfileOpen(true)}
+              aria-label="Open profile"
+              title="Your Profile"
+              className="w-9 h-9 flex items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-pink-600 hover:opacity-90 transition-opacity"
+            >
+              <User size={16} className="text-white" />
+            </button>
+          </div>
         </div>
       </nav>
 
       <main className="max-w-4xl mx-auto px-4 py-12 flex flex-col gap-8 justify-end min-h-[80vh]">
 
-        {/* Hero — sirf tab jab koi message nahi */}
         <AnimatePresence>
           {messages.length === 0 && !loading && (
             <motion.div
@@ -84,7 +180,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Saari messages — purani bhi, nayi bhi */}
         <div className="flex flex-col gap-8">
           {messages.map((msg, index) => (
             <motion.div
@@ -93,20 +188,34 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4 }}
             >
-              {/* Question border mein */}
               <div className="border border-purple-500/40 rounded-xl px-4 py-3 mb-4 bg-purple-500/10">
-                <p className="text-xs text-purple-300 font-mono">
+                <p className="text-xs text-purple-300 font-mono mb-2">
                   You asked: <span className="text-white">"{msg.query}"</span>
                 </p>
+
+                {msg.attachment && (
+                  <div className="inline-flex items-center gap-2 bg-slate-800/60 border border-purple-500/30 rounded-lg px-3 py-1.5 group relative">
+                    <FileText size={14} className="text-purple-300" />
+                    <span className="text-xs text-white max-w-[160px] truncate">
+                      {msg.attachment.filename}
+                    </span>
+                    <button
+                      onClick={() => handleDeleteAttachment(msg.attachment!.document_id)}
+                      className="opacity-0 group-hover:opacity-100 text-red-300 hover:text-red-400 transition-opacity ml-1"
+                      aria-label="Delete document"
+                      title="Delete document"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Answer */}
               <ResponseDisplay markdown={msg.response} />
             </motion.div>
           ))}
         </div>
 
-        {/* Error */}
         <AnimatePresence>
           {error && (
             <motion.div
@@ -120,7 +229,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Loading */}
         <AnimatePresence>
           {loading && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -129,10 +237,8 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Auto scroll yahan tak */}
         <div ref={bottomRef} />
 
-        {/* Search bar — hamesha neeche */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -142,6 +248,18 @@ export default function App() {
         </motion.div>
 
       </main>
+
+      <DocumentManager
+        isOpen={isDocManagerOpen}
+        onClose={() => setIsDocManagerOpen(false)}
+      />
+
+      <ProfileModal
+        isOpen={isProfileOpen}
+        onClose={() => setIsProfileOpen(false)}
+        session={session}
+        onLogout={handleLogout}
+      />
     </div>
   );
 }

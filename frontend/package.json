@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
     "ajv": "^8.20.0",
     "axios": "^1.6.2",
     "framer-motion": "^10.16.16",

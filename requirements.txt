@@ -11,3 +11,6 @@ python-dotenv
 typesense
 langchain_openai
 langgraph
+supabase
+docx2txt
+PyJWT

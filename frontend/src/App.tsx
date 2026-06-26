@@ -36,15 +36,13 @@ export default function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      setSession(session);
-
-      // onAuthStateChange fires on many events, not just login/logout —
-      // e.g. TOKEN_REFRESHED fires automatically when the access token is
-      // silently refreshed (this happens when you switch back to the tab).
-      // Only clear the chat on a real sign-in or sign-out, never on a
-      // background token refresh.
-      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+      // Sirf SIGNED_OUT aur TOKEN_REFRESHED handle karo
+      // SIGNED_IN intentionally ignore kiya — AuthPage OTP verify ke baad manually setSession karega
+      if (event === 'SIGNED_OUT') {
+        setSession(null);
         setMessages([]);
+      } else if (event === 'TOKEN_REFRESHED') {
+        setSession(session);
       }
     });
 
@@ -127,7 +125,7 @@ export default function App() {
   }
 
   if (!session) {
-    return <AuthPage onAuthSuccess={() => {}} />;
+    return <AuthPage setSession={setSession} />;
   }
 
   return (

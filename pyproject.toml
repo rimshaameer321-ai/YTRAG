@@ -23,3 +23,6 @@ dependencies = [
     "sentence-transformers>=5.5.0",
     "typesense>=2.0.0",
 ]
+
+[tool.vercel]
+entrypoint = "api:app"

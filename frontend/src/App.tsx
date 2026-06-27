@@ -4,13 +4,13 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FileText, Trash2, User, Plus, MessageSquare, ChevronLeft, ChevronRight } from 'lucide-react';
+import { FileText, Trash2, Plus, MessageSquare, ChevronLeft, ChevronRight } from 'lucide-react';
 import SearchBar, { AttachedDocument } from './components/SearchBar';
 import ResponseDisplay from './components/ResponseDisplay';
 import LoadingAnimation from './components/LoadingAnimation';
 import AuthPage from './AuthPage';
 import DocumentManager from './DocumentManager';
-import ProfileModal from './ProfileModal';
+import ProfileModal, { getDisplayName } from './ProfileModal';
 import { supabase } from './supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 
@@ -104,7 +104,8 @@ export default function App() {
 
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // CHANGED: Sidebar ab default band rehti hai — user khud kholega toggle button se.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [isDocManagerOpen, setIsDocManagerOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
@@ -299,6 +300,10 @@ export default function App() {
     return <AuthPage setSession={setSession} />;
   }
 
+  // CHANGED: Profile footer ke liye naam aur avatar letter nikal liye.
+  const displayName = getDisplayName(session);
+  const avatarLetter = displayName.charAt(0).toUpperCase();
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-slate-900 flex">
 
@@ -329,31 +334,49 @@ export default function App() {
             </div>
 
             <div className="flex-1 overflow-y-auto py-2">
-              {chats.length === 0 && (
+              {chats.length === 0 ? (
                 <p className="text-purple-400/50 text-xs text-center mt-8 px-4">
                   No chats yet. Start a new conversation!
                 </p>
+              ) : (
+                <>
+                  {/* CHANGED: "Recents" heading chats list ke upar */}
+                  <p className="px-4 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-purple-400/60">
+                    Recents
+                  </p>
+                  {chats.map(chat => (
+                    <button
+                      key={chat.id}
+                      onClick={() => setActiveChatId(chat.id)}
+                      className={`w-full text-left px-4 py-3 flex items-center gap-2 group transition-colors hover:bg-purple-500/10
+                        ${activeChatId === chat.id ? 'bg-purple-500/20 border-r-2 border-purple-400' : ''}`}
+                    >
+                      <MessageSquare size={14} className="text-purple-400 shrink-0" />
+                      <span className="text-sm text-white/80 truncate flex-1">{chat.title}</span>
+                      <span
+                        role="button"
+                        onClick={(e) => handleDeleteChat(chat.id, e)}
+                        className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity p-1"
+                        title="Delete chat"
+                      >
+                        <Trash2 size={12} />
+                      </span>
+                    </button>
+                  ))}
+                </>
               )}
-              {chats.map(chat => (
-                <button
-                  key={chat.id}
-                  onClick={() => setActiveChatId(chat.id)}
-                  className={`w-full text-left px-4 py-3 flex items-center gap-2 group transition-colors hover:bg-purple-500/10
-                    ${activeChatId === chat.id ? 'bg-purple-500/20 border-r-2 border-purple-400' : ''}`}
-                >
-                  <MessageSquare size={14} className="text-purple-400 shrink-0" />
-                  <span className="text-sm text-white/80 truncate flex-1">{chat.title}</span>
-                  <span
-                    role="button"
-                    onClick={(e) => handleDeleteChat(chat.id, e)}
-                    className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity p-1"
-                    title="Delete chat"
-                  >
-                    <Trash2 size={12} />
-                  </span>
-                </button>
-              ))}
             </div>
+
+            {/* CHANGED: Sidebar footer — ChatGPT jaisa profile section (avatar + naam) */}
+            <button
+              onClick={() => setIsProfileOpen(true)}
+              className="border-t border-purple-500/20 px-4 py-3 flex items-center gap-3 hover:bg-purple-500/10 transition-colors shrink-0"
+            >
+              <div className="w-8 h-8 bg-gradient-to-br from-purple-400 to-pink-600 rounded-full flex items-center justify-center shrink-0">
+                <span className="text-white font-bold text-xs">{avatarLetter}</span>
+              </div>
+              <span className="text-sm text-white/80 truncate">{displayName}</span>
+            </button>
           </motion.aside>
         )}
       </AnimatePresence>
@@ -378,12 +401,6 @@ export default function App() {
                 className="text-sm text-purple-300 border border-purple-500/30 rounded-lg px-3 py-1.5 hover:bg-purple-500/10"
               >
                 Your Docs
-              </button>
-              <button
-                onClick={() => setIsProfileOpen(true)}
-                className="w-9 h-9 flex items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-pink-600 hover:opacity-90 transition-opacity"
-              >
-                <User size={16} className="text-white" />
               </button>
             </div>
           </div>
@@ -416,24 +433,25 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.4 }}
                 >
-                  <div className="border border-purple-500/40 rounded-xl px-4 py-3 mb-4 bg-purple-500/10">
-                    <p className="text-xs text-purple-300 font-mono mb-2">
-                      You asked: <span className="text-white">"{msg.query}"</span>
-                    </p>
-                    {msg.attachment && (
-                      <div className="inline-flex items-center gap-2 bg-slate-800/60 border border-purple-500/30 rounded-lg px-3 py-1.5 group relative">
-                        <FileText size={14} className="text-purple-300" />
-                        <span className="text-xs text-white max-w-[160px] truncate">
-                          {msg.attachment.filename}
-                        </span>
-                        <button
-                          onClick={() => handleDeleteAttachment(msg.attachment!.document_id)}
-                          className="opacity-0 group-hover:opacity-100 text-red-300 hover:text-red-400 transition-opacity ml-1"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    )}
+                  {/* CHANGED: User ka sawal ab right side pe — chat bubble jaisa */}
+                  <div className="flex justify-end mb-4">
+                    <div className="border border-purple-500/40 rounded-xl px-4 py-3 bg-purple-500/10 max-w-[80%]">
+                      <p className="text-sm text-white text-right">{msg.query}</p>
+                      {msg.attachment && (
+                        <div className="inline-flex items-center gap-2 bg-slate-800/60 border border-purple-500/30 rounded-lg px-3 py-1.5 group relative mt-2">
+                          <FileText size={14} className="text-purple-300" />
+                          <span className="text-xs text-white max-w-[160px] truncate">
+                            {msg.attachment.filename}
+                          </span>
+                          <button
+                            onClick={() => handleDeleteAttachment(msg.attachment!.document_id)}
+                            className="opacity-0 group-hover:opacity-100 text-red-300 hover:text-red-400 transition-opacity ml-1"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <ResponseDisplay markdown={msg.response} />
                 </motion.div>

@@ -2,6 +2,7 @@
 // Main input bar for asking questions.
 // NEW: Shows a list of uploaded documents with enable/disable toggles.
 //      Only enabled documents are searched when the user sends a query.
+// CHANGED: File input now accepts multiple files; they upload one-by-one in sequence.
 // Existing: inline file upload, attachment preview, send on Enter.
 
 import { useState, useRef, useEffect } from 'react';
@@ -32,8 +33,11 @@ interface SearchBarProps {
 
 export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: SearchBarProps) {
   const [query, setQuery] = useState('');
+  // CHANGED: ab sirf last uploaded document attachment preview ke liye, baaki sab uploadedDocs mein
   const [attachment, setAttachment] = useState<AttachedDocument | null>(null);
   const [uploading, setUploading] = useState(false);
+  // CHANGED: kitni files total/kitni ho chuki hain, "Uploading 2/5..." jaisa dikhane ke liye
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [uploadError, setUploadError] = useState('');
   const [uploadedDocs, setUploadedDocs] = useState<UploadedDoc[]>([]);  // NEW: list of all user docs
   const [docsMenuOpen, setDocsMenuOpen] = useState(false);              // NEW: toggle doc panel visibility
@@ -97,46 +101,74 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     fileInputRef.current?.click();  // Programmatically open the file picker dialog
   };
 
+  // Helper: upload a single file to the backend, returns the new doc info
+  const uploadSingleFile = async (file: File): Promise<UploadedDoc> => {
+    const headers = await getAuthHeader();
+    const formData = new FormData();
+    formData.append('file', file);  // Attach the file to a multipart form
+
+    const res = await fetch(`${apiUrl}/upload`, {
+      method: 'POST',
+      headers,           // Only Authorization header; Content-Type is set by browser for FormData
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Upload failed for ${file.name}.`);
+    }
+
+    const data = await res.json();
+    return { id: data.document_id, filename: data.filename, enabled: true };
+  };
+
+  // CHANGED: Ab multiple files handle karta hai — ek-ek karke sequentially upload hoti hain
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
     if (uploading) return;  // Guard against double-fire in React StrictMode
+
+    const fileList = Array.from(files); // FileList -> array, taake loop kar sakein
 
     setUploading(true);
     setUploadError('');
+    setUploadProgress({ done: 0, total: fileList.length });
 
-    try {
-      const headers = await getAuthHeader();
-      const formData = new FormData();
-      formData.append('file', file);  // Attach the file to a multipart form
+    const newlyUploaded: UploadedDoc[] = [];
+    const failedNames: string[] = [];
 
-      const res = await fetch(`${apiUrl}/upload`, {
-        method: 'POST',
-        headers,           // Only Authorization header; Content-Type is set by browser for FormData
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Upload failed.');
+    // Har file ek ke baad ek upload karo (sequential), taake server pe ek waqt
+    // mein ek hi request jaye aur progress count sahi dikhe
+    for (let i = 0; i < fileList.length; i++) {
+      try {
+        const uploadedDoc = await uploadSingleFile(fileList[i]);
+        newlyUploaded.push(uploadedDoc);
+      } catch (err: any) {
+        failedNames.push(fileList[i].name);
+      } finally {
+        setUploadProgress({ done: i + 1, total: fileList.length });
       }
-
-      const data = await res.json();
-
-      // Set as the inline attachment (shown above input bar)
-      setAttachment({ document_id: data.document_id, filename: data.filename });
-
-      // NEW: Also add this doc to the uploadedDocs list (enabled by default)
-      setUploadedDocs(prev => [
-        ...prev,
-        { id: data.document_id, filename: data.filename, enabled: true },
-      ]);
-    } catch (err: any) {
-      setUploadError(err.message || 'Upload failed.');
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';  // Reset file input
     }
+
+    // Saari successful uploads ko docs list mein add karo
+    if (newlyUploaded.length > 0) {
+      setUploadedDocs(prev => [...prev, ...newlyUploaded]);
+      // Sabse aakhri successful upload ko inline attachment preview ke taur pe dikhao
+      const last = newlyUploaded[newlyUploaded.length - 1];
+      setAttachment({ document_id: last.id, filename: last.filename });
+    }
+
+    if (failedNames.length > 0) {
+      setUploadError(
+        failedNames.length === 1
+          ? `Upload failed for ${failedNames[0]}.`
+          : `${failedNames.length} files failed to upload.`
+      );
+    }
+
+    setUploading(false);
+    setUploadProgress(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';  // Reset file input
   };
 
   // Delete the attached document from backend + clear from UI
@@ -240,7 +272,11 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
               <FileText size={16} className="text-purple-300" />
             </div>
             <span className="text-sm text-white max-w-[180px] truncate">
-              {uploading ? 'Uploading...' : attachment?.filename}
+              {uploading
+                ? (uploadProgress && uploadProgress.total > 1
+                    ? `Uploading ${uploadProgress.done}/${uploadProgress.total}...`
+                    : 'Uploading...')
+                : attachment?.filename}
             </span>
 
             {!uploading && (
@@ -264,11 +300,12 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
 
       <form onSubmit={handleSubmit} className="w-full">
         <div className="relative">
-          {/* Hidden file input */}
+          {/* Hidden file input — CHANGED: now accepts multiple files at once */}
           <input
             ref={fileInputRef}
             type="file"
             accept=".pdf,.txt,.csv,.xlsx,.docx,.json"
+            multiple
             onChange={handleFileSelect}
             className="hidden"
           />
@@ -278,7 +315,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
             type="button"
             onClick={handlePlusClick}
             disabled={disabled || uploading}
-            title="Upload a document"
+            title="Upload documents"
             className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center bg-slate-700 border border-slate-500 text-white hover:bg-slate-600 hover:border-purple-400 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm z-10"
           >
             <Plus size={18} strokeWidth={2.5} />

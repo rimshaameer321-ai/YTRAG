@@ -1,13 +1,12 @@
 // SearchBar.tsx
-// Purpose: The main input bar for asking questions, now extended with
-// an inline document attachment feature. Clicking the "+" button lets
-// the user pick a file, which is immediately uploaded to the backend.
-// Once uploaded, a preview card appears above the input showing the
-// file, with a way to remove (delete) it before or after sending.
+// Main input bar for asking questions.
+// NEW: Shows a list of uploaded documents with enable/disable toggles.
+//      Only enabled documents are searched when the user sends a query.
+// Existing: inline file upload, attachment preview, send on Enter.
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Send, Plus, FileText, X } from 'lucide-react';
+import { Search, Send, Plus, FileText, X, ChevronUp, ToggleLeft, ToggleRight } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 
 export interface AttachedDocument {
@@ -15,8 +14,18 @@ export interface AttachedDocument {
   filename: string;
 }
 
+interface UploadedDoc {
+  id: string;         // document_id from backend
+  filename: string;   // original filename
+  enabled: boolean;   // NEW: whether this doc is included in searches
+}
+
 interface SearchBarProps {
-  onSearch: (query: string, attachment: AttachedDocument | null) => void;
+  onSearch: (
+    query: string,
+    attachment: AttachedDocument | null,
+    enabledDocIds: string[] | null  // NEW: null means "use all docs"
+  ) => void;
   disabled: boolean;
   onDocumentDeleted?: (documentId: string) => void;
 }
@@ -26,11 +35,13 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
   const [attachment, setAttachment] = useState<AttachedDocument | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [uploadedDocs, setUploadedDocs] = useState<UploadedDoc[]>([]);  // NEW: list of all user docs
+  const [docsMenuOpen, setDocsMenuOpen] = useState(false);              // NEW: toggle doc panel visibility
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
-  // Helper: get the current session's access token to attach to API calls
+  // Helper: get JWT token from the current Supabase session
   const getAuthHeader = async () => {
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
@@ -38,16 +49,58 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     return { Authorization: `Bearer ${token}` };
   };
 
+  // NEW: Fetch all uploaded documents for this user on component mount
+  useEffect(() => {
+    const fetchDocs = async () => {
+      try {
+        const headers = await getAuthHeader();
+        const res = await fetch(`${apiUrl}/documents`, { headers });  // GET /documents
+        if (!res.ok) return;
+        const data = await res.json();
+        // Map the backend response to UploadedDoc shape, all enabled by default
+        setUploadedDocs(
+          (data.documents ?? []).map((d: any) => ({
+            id: d.id,
+            filename: d.filename,
+            enabled: true,  // All docs start as enabled
+          }))
+        );
+      } catch {
+        // Silently ignore — user just won't see the doc toggle panel
+      }
+    };
+    fetchDocs();
+  }, []); // Empty array = run once on mount
+
+  // NEW: Toggle a document's enabled/disabled state
+  const toggleDoc = (docId: string) => {
+    setUploadedDocs(prev =>
+      prev.map(doc =>
+        doc.id === docId
+          ? { ...doc, enabled: !doc.enabled }  // Flip the enabled flag
+          : doc
+      )
+    );
+  };
+
+  // NEW: Compute which document IDs are currently enabled
+  // Returns null if ALL documents are enabled (tell backend "use everything")
+  // Returns an array of IDs if only SOME are enabled (backend filters by this list)
+  const getEnabledDocIds = (): string[] | null => {
+    const enabledIds = uploadedDocs.filter(d => d.enabled).map(d => d.id);
+    return enabledIds.length === uploadedDocs.length ? null : enabledIds;
+    // null = all docs enabled = no filter needed
+    // array = subset of docs = backend will only search these
+  };
+
   const handlePlusClick = () => {
-    fileInputRef.current?.click();
+    fileInputRef.current?.click();  // Programmatically open the file picker dialog
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    // Guard against double-firing (e.g. React StrictMode in development)
-    if (uploading) return;
+    if (uploading) return;  // Guard against double-fire in React StrictMode
 
     setUploading(true);
     setUploadError('');
@@ -55,11 +108,11 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     try {
       const headers = await getAuthHeader();
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', file);  // Attach the file to a multipart form
 
       const res = await fetch(`${apiUrl}/upload`, {
         method: 'POST',
-        headers,
+        headers,           // Only Authorization header; Content-Type is set by browser for FormData
         body: formData,
       });
 
@@ -69,17 +122,24 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
       }
 
       const data = await res.json();
+
+      // Set as the inline attachment (shown above input bar)
       setAttachment({ document_id: data.document_id, filename: data.filename });
+
+      // NEW: Also add this doc to the uploadedDocs list (enabled by default)
+      setUploadedDocs(prev => [
+        ...prev,
+        { id: data.document_id, filename: data.filename, enabled: true },
+      ]);
     } catch (err: any) {
       setUploadError(err.message || 'Upload failed.');
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (fileInputRef.current) fileInputRef.current.value = '';  // Reset file input
     }
   };
 
-  // Permanently deletes the attached document from the backend
-  // (FAISS index, Supabase record, and the file on disk).
+  // Delete the attached document from backend + clear from UI
   const handleRemoveAttachment = async () => {
     if (!attachment) return;
     const documentId = attachment.document_id;
@@ -90,29 +150,32 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
         method: 'DELETE',
         headers,
       });
-    } catch (err) {
-      // Even if the delete call fails, we still clear the local preview
-      // so the user isn't stuck with a broken attachment in the input.
+    } catch {
+      // Even if server delete fails, clear from UI so user isn't stuck
     } finally {
       setAttachment(null);
-      onDocumentDeleted?.(documentId);
+      onDocumentDeleted?.(documentId);  // Notify parent (App.tsx) to clean up messages
+      // NEW: Also remove from the docs toggle list
+      setUploadedDocs(prev => prev.filter(d => d.id !== documentId));
     }
   };
 
+  // Called when user presses Enter or clicks Send
   const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+    e.preventDefault();  // Prevent default form submission (page reload)
     if (query.trim()) {
-      onSearch(query.trim(), attachment);
+      onSearch(query.trim(), attachment, getEnabledDocIds());  // NEW: pass enabled doc IDs
       setQuery('');
       setAttachment(null);
     }
   };
 
+  // Also submit on Enter (but not Shift+Enter)
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (query.trim()) {
-        onSearch(query.trim(), attachment);
+        onSearch(query.trim(), attachment, getEnabledDocIds());  // NEW: pass enabled doc IDs
         setQuery('');
         setAttachment(null);
       }
@@ -121,7 +184,50 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
 
   return (
     <div className="w-full">
-      {/* Attachment preview card — shown above the input once a file is uploaded */}
+
+      {/* NEW: Document enable/disable panel */}
+      <AnimatePresence>
+        {docsMenuOpen && uploadedDocs.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            className="mb-3 bg-slate-800/80 border border-purple-500/30 rounded-xl p-3"
+          >
+            <p className="text-xs text-purple-300 font-semibold mb-2">
+              Toggle Documents — only enabled docs will be searched
+            </p>
+            <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+              {uploadedDocs.map(doc => (
+                <div
+                  key={doc.id}
+                  className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-700/50"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText size={13} className="text-purple-400 shrink-0" />
+                    <span className={`text-xs truncate max-w-[180px] ${doc.enabled ? 'text-white' : 'text-slate-500 line-through'}`}>
+                      {doc.filename}
+                    </span>
+                  </div>
+                  {/* Toggle button */}
+                  <button
+                    onClick={() => toggleDoc(doc.id)}
+                    className={`shrink-0 transition-colors ${doc.enabled ? 'text-purple-400' : 'text-slate-600'}`}
+                    title={doc.enabled ? 'Disable this document' : 'Enable this document'}
+                  >
+                    {doc.enabled
+                      ? <ToggleRight size={20} />   // Enabled icon
+                      : <ToggleLeft size={20} />    // Disabled icon
+                    }
+                  </button>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Attachment preview */}
       <AnimatePresence>
         {(attachment || uploading) && (
           <motion.div
@@ -151,13 +257,14 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
         )}
       </AnimatePresence>
 
+      {/* Upload error */}
       {uploadError && (
         <p className="text-red-300 text-xs mb-2 ml-1">⚠️ {uploadError}</p>
       )}
 
       <form onSubmit={handleSubmit} className="w-full">
         <div className="relative">
-          {/* Hidden file input, triggered by the "+" button */}
+          {/* Hidden file input */}
           <input
             ref={fileInputRef}
             type="file"
@@ -166,24 +273,23 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
             className="hidden"
           />
 
-          {/* "+" attach button */}
+          {/* "+" upload button */}
           <button
             type="button"
             onClick={handlePlusClick}
             disabled={disabled || uploading}
-            title="Upload Documents"
+            title="Upload a document"
             className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center bg-slate-700 border border-slate-500 text-white hover:bg-slate-600 hover:border-purple-400 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm z-10"
-            aria-label="Upload Documents"
           >
             <Plus size={18} strokeWidth={2.5} />
           </button>
 
-          {/* Search icon */}
+          {/* Search icon (decorative) */}
           <div className="absolute left-14 top-1/2 -translate-y-1/2 text-purple-400 pointer-events-none">
             <Search size={18} />
           </div>
 
-          {/* Input */}
+          {/* Text input */}
           <input
             type="text"
             value={query}
@@ -191,7 +297,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
             onKeyDown={handleKeyDown}
             disabled={disabled}
             placeholder="Ask anything about your documents…"
-            className="w-full pl-24 pr-16 py-4 
+            className="w-full pl-24 pr-24 py-4 
                        bg-slate-800/50 backdrop-blur-sm 
                        border-2 border-gray-500/30 rounded-xl 
                        text-white placeholder-purple-300/40 
@@ -200,26 +306,53 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
                        transition-all text-sm"
           />
 
-          {/* Send button */}
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            type="submit"
-            disabled={disabled || !query.trim()}
-            className="absolute right-2 top-1/2 -translate-y-1/2 
-                       p-2.5 bg-gradient-to-r from-gray-600 to-gray-700 
-                       rounded-lg text-white 
-                       hover:shadow-lg hover:shadow-purple-500/40 
-                       disabled:opacity-40 disabled:cursor-not-allowed 
-                       transition-all"
-          >
-            <Send size={17} />
-          </motion.button>
+          {/* Right side buttons */}
+          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+
+            {/* NEW: Docs toggle button */}
+            {uploadedDocs.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setDocsMenuOpen(prev => !prev)}
+                title="Toggle documents"
+                className={`p-2 rounded-lg transition-colors
+                  ${docsMenuOpen
+                    ? 'bg-purple-500/40 text-purple-200'
+                    : 'text-purple-400 hover:bg-purple-500/20'
+                  }`}
+              >
+                <ChevronUp
+                  size={16}
+                  className={`transition-transform ${docsMenuOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+            )}
+
+            {/* Send button */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              type="submit"
+              disabled={disabled || !query.trim()}
+              className="p-2.5 bg-gradient-to-r from-gray-600 to-gray-700 
+                         rounded-lg text-white 
+                         hover:shadow-lg hover:shadow-purple-500/40 
+                         disabled:opacity-40 disabled:cursor-not-allowed 
+                         transition-all"
+            >
+              <Send size={17} />
+            </motion.button>
+          </div>
         </div>
 
-        {/* Hint */}
+        {/* Hint text */}
         <p className="text-xs text-purple-400/40 mt-2 ml-1">
           Press Enter to search
+          {uploadedDocs.length > 0 && (
+            <span className="ml-2">
+              · {uploadedDocs.filter(d => d.enabled).length}/{uploadedDocs.length} docs active
+            </span>
+          )}
         </p>
       </form>
     </div>

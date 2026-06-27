@@ -1,11 +1,14 @@
 # api.py
-# Main FastAPI backend. Handles search, document upload, listing, and deletion.
+# Main FastAPI backend.
+# NEW: /search now accepts chat_history so the AI has conversation context.
+# NEW: documents can be enabled/disabled per query via enabled_document_ids.
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # Load .env file so OPENAI_KEY, SUPABASE_URL etc. are available
 
 import uuid
 from pathlib import Path
+from typing import List, Optional  # NEW: List and Optional for typed fields in request body
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,29 +23,68 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],   # Allow all origins (frontend can call this API)
+    allow_methods=["*"],   # Allow all HTTP methods (GET, POST, DELETE, etc.)
+    allow_headers=["*"],   # Allow all headers (including Authorization)
 )
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = Path("uploads")        # Folder where uploaded files are saved on disk
+UPLOAD_DIR.mkdir(exist_ok=True)     # Create folder if it doesn't already exist
 
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".csv", ".xlsx", ".docx", ".json"}
 
 
+# --- Request / Response Models ---
+
+class ChatMessage(BaseModel):
+    """
+    Represents a single message in the conversation history.
+    role: "user" (human) or "assistant" (AI)
+    content: the actual text of that message
+    """
+    role: str     # "user" or "assistant"
+    content: str  # The message text
+
+
 class SearchRequest(BaseModel):
+    """
+    Body of the POST /search request.
+    query: the current question being asked
+    top_k: how many document chunks to retrieve from FAISS (default 5)
+    chat_history: list of previous messages — NEW, used for context
+    enabled_document_ids: if provided, search ONLY these documents — NEW
+    """
     query: str
     top_k: int = 5
+    chat_history: List[ChatMessage] = []           # NEW: previous messages (default empty list)
+    enabled_document_ids: Optional[List[str]] = None  # NEW: None means use all documents
 
 
+# --- Single RAGSearch instance shared across all requests ---
 rag = RAGSearch()
 
 
 @app.post("/search")
 async def search(req: SearchRequest, user=Depends(get_current_user)):
+    """
+    Main search endpoint.
+    - Receives the query + chat history + optional document filter
+    - Searches FAISS for relevant document chunks
+    - Sends everything to the AI with full context
+    - Returns the AI's answer
+    """
     try:
-        summary = rag.search_and_summarize(req.query, req.top_k, user_id=user.id)
+        # Convert Pydantic ChatMessage objects to plain dicts for the search function
+        # e.g. [{"role": "user", "content": "What is X?"}, {"role": "assistant", "content": "X is..."}]
+        history_dicts = [{"role": m.role, "content": m.content} for m in req.chat_history]
+
+        summary = rag.search_and_summarize(
+            query=req.query,
+            top_k=req.top_k,
+            user_id=user.id,
+            chat_history=history_dicts,                   # NEW: pass history to RAGSearch
+            enabled_document_ids=req.enabled_document_ids  # NEW: pass document filter to RAGSearch
+        )
         return {"summary": summary, "documents": []}
     except Exception as e:
         return {"error": str(e)}
@@ -73,7 +115,7 @@ async def upload_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
-    # Load ONLY this specific file (not the whole uploads folder)
+    # Extract text from the saved file
     try:
         loaded_docs = load_single_file(str(saved_path))
         if not loaded_docs:
@@ -83,7 +125,7 @@ async def upload_document(
         saved_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"Failed to read file content: {e}")
 
-    # Add to FAISS
+    # Add to FAISS vector store
     try:
         rag.vectorstore.add_document(document_id, file.filename, raw_text, user_id=user.id)
     except Exception as e:
@@ -110,7 +152,12 @@ async def list_documents(
     user_supabase: Client = Depends(get_supabase_for_user),
 ):
     try:
-        response = user_supabase.table("documents").select("*").eq("user_id", user.id).execute()
+        response = (
+            user_supabase.table("documents")
+            .select("*")
+            .eq("user_id", user.id)
+            .execute()
+        )
         return {"documents": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {e}")
@@ -122,7 +169,13 @@ async def delete_document(
     user=Depends(get_current_user),
     user_supabase: Client = Depends(get_supabase_for_user),
 ):
-    result = user_supabase.table("documents").select("*").eq("id", document_id).eq("user_id", user.id).execute()
+    result = (
+        user_supabase.table("documents")
+        .select("*")
+        .eq("id", document_id)
+        .eq("user_id", user.id)
+        .execute()
+    )
     if not result.data:
         raise HTTPException(status_code=404, detail="Document not found or no permission.")
 

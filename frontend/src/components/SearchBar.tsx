@@ -1,13 +1,15 @@
 // SearchBar.tsx
 // Main input bar for asking questions.
-// NEW: Shows a list of uploaded documents with enable/disable toggles.
-//      Only enabled documents are searched when the user sends a query.
+// CHANGED: Document enable/disable is now a GLOBAL setting controlled from
+//      the Settings panel (SettingsModal.tsx) — this component no longer
+//      shows its own per-chat toggle list. It still shows a small read-only
+//      summary of how many documents are currently active.
 // CHANGED: File input now accepts multiple files; they upload one-by-one in sequence.
 // Existing: inline file upload, attachment preview, send on Enter.
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Send, Plus, FileText, X, ChevronUp, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Search, Send, Plus, FileText, X } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 
 export interface AttachedDocument {
@@ -18,18 +20,16 @@ export interface AttachedDocument {
 interface UploadedDoc {
   id: string;         // document_id from backend
   filename: string;   // original filename
-  enabled: boolean;   // NEW: whether this doc is included in searches
+  enabled: boolean;   // CHANGED: reflects the GLOBAL setting from Settings — read-only here
 }
 
 interface SearchBarProps {
-  onSearch: (
-    query: string,
-    attachments: AttachedDocument[],
-    enabledDocIds: string[] | null  // NEW: null means "use all docs"
-  ) => void;
+  // CHANGED: enabledDocIds removed — the backend now determines which
+  // documents to search based on the global Settings, not a per-chat list.
+  onSearch: (query: string, attachments: AttachedDocument[]) => void;
   disabled: boolean;
   onDocumentDeleted?: (documentId: string) => void;
-  // NEW: jab yeh value badalti hai (hub se upload/delete hone par), docs list refresh hoti hai
+  // jab yeh value badalti hai (Settings ya hub se upload/delete/toggle hone par), docs summary refresh hoti hai
   docsRefreshKey?: number;
 }
 
@@ -41,8 +41,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
   // CHANGED: kitni files total/kitni ho chuki hain, "Uploading 2/5..." jaisa dikhane ke liye
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [uploadError, setUploadError] = useState('');
-  const [uploadedDocs, setUploadedDocs] = useState<UploadedDoc[]>([]);  // NEW: list of all user docs
-  const [docsMenuOpen, setDocsMenuOpen] = useState(false);              // NEW: toggle doc panel visibility
+  const [uploadedDocs, setUploadedDocs] = useState<UploadedDoc[]>([]);  // CHANGED: sirf read-only summary ke liye
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
@@ -55,10 +54,9 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
     return { Authorization: `Bearer ${token}` };
   };
 
-  // NEW: Fetch all uploaded documents for this user — re-run on mount AND
-  // whenever docsRefreshKey changes (i.e. user uploaded/deleted from the hub).
-  // CHANGED: existing toggle states (enabled/disabled) are preserved across
-  // refreshes — only newly-added docs default to enabled, and removed docs drop out.
+  // CHANGED: Fetch all uploaded documents for this user — re-run on mount AND
+  // whenever docsRefreshKey changes (i.e. Settings or the hub changed something).
+  // `enabled` here directly reflects the GLOBAL backend value, not a local toggle.
   useEffect(() => {
     const fetchDocs = async () => {
       try {
@@ -66,41 +64,19 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
         const res = await fetch(`${apiUrl}/documents`, { headers });  // GET /documents
         if (!res.ok) return;
         const data = await res.json();
-        setUploadedDocs(prev => {
-          const prevById = new Map(prev.map(d => [d.id, d]));
-          return (data.documents ?? []).map((d: any) => ({
+        setUploadedDocs(
+          (data.documents ?? []).map((d: any) => ({
             id: d.id,
             filename: d.filename,
-            enabled: prevById.get(d.id)?.enabled ?? true, // purana toggle state rakho, naya default enabled
-          }));
-        });
+            enabled: d.enabled ?? true, // global flag from backend
+          }))
+        );
       } catch {
-        // Silently ignore — user just won't see the doc toggle panel
+        // Silently ignore — user just won't see the docs summary line
       }
     };
     fetchDocs();
-  }, [docsRefreshKey]); // mount par bhi chalega (undefined -> defined) aur jab hub se docs badlen
-
-  // NEW: Toggle a document's enabled/disabled state
-  const toggleDoc = (docId: string) => {
-    setUploadedDocs(prev =>
-      prev.map(doc =>
-        doc.id === docId
-          ? { ...doc, enabled: !doc.enabled }  // Flip the enabled flag
-          : doc
-      )
-    );
-  };
-
-  // NEW: Compute which document IDs are currently enabled
-  // Returns null if ALL documents are enabled (tell backend "use everything")
-  // Returns an array of IDs if only SOME are enabled (backend filters by this list)
-  const getEnabledDocIds = (): string[] | null => {
-    const enabledIds = uploadedDocs.filter(d => d.enabled).map(d => d.id);
-    return enabledIds.length === uploadedDocs.length ? null : enabledIds;
-    // null = all docs enabled = no filter needed
-    // array = subset of docs = backend will only search these
-  };
+  }, [docsRefreshKey]); // mount par bhi chalega (undefined -> defined) aur jab Settings/hub se docs badlen
 
   const handlePlusClick = () => {
     fileInputRef.current?.click();  // Programmatically open the file picker dialog
@@ -201,7 +177,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();  // Prevent default form submission (page reload)
     if (query.trim()) {
-      onSearch(query.trim(), attachments, getEnabledDocIds());  // CHANGED: pass full attachments array
+      onSearch(query.trim(), attachments);  // CHANGED: enabled-docs filtering now happens on the backend (Settings-driven)
       setQuery('');
       setAttachments([]);
     }
@@ -212,7 +188,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (query.trim()) {
-        onSearch(query.trim(), attachments, getEnabledDocIds());  // CHANGED: pass full attachments array
+        onSearch(query.trim(), attachments);  // CHANGED: enabled-docs filtering now happens on the backend (Settings-driven)
         setQuery('');
         setAttachments([]);
       }
@@ -222,49 +198,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
   return (
     <div className="w-full">
 
-      {/* NEW: Document enable/disable panel */}
-      <AnimatePresence>
-        {docsMenuOpen && uploadedDocs.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            className="mb-3 bg-slate-800/80 border border-purple-500/30 rounded-xl p-3"
-          >
-            <p className="text-xs text-purple-300 font-semibold mb-2">
-              Toggle Documents — only enabled docs will be searched
-            </p>
-            <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
-              {uploadedDocs.map(doc => (
-                <div
-                  key={doc.id}
-                  className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-700/50"
-                >
-                  <div className="flex items-center gap-2">
-                    <FileText size={13} className="text-purple-400 shrink-0" />
-                    <span className={`text-xs truncate max-w-[180px] ${doc.enabled ? 'text-white' : 'text-slate-500 line-through'}`}>
-                      {doc.filename}
-                    </span>
-                  </div>
-                  {/* Toggle button */}
-                  <button
-                    onClick={() => toggleDoc(doc.id)}
-                    className={`shrink-0 transition-colors ${doc.enabled ? 'text-purple-400' : 'text-slate-600'}`}
-                    title={doc.enabled ? 'Disable this document' : 'Enable this document'}
-                  >
-                    {doc.enabled
-                      ? <ToggleRight size={20} />   // Enabled icon
-                      : <ToggleLeft size={20} />    // Disabled icon
-                    }
-                  </button>
-                </div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Attachment preview — CHANGED: ab grid cards mein, ek se zyada files dikhati hain */}
+      {/* Attachment preview — grid cards mein, ek se zyada files dikhati hain */}
       <AnimatePresence>
         {(attachments.length > 0 || uploading) && (
           <motion.div
@@ -367,25 +301,6 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
           {/* Right side buttons */}
           <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
 
-            {/* NEW: Docs toggle button */}
-            {uploadedDocs.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setDocsMenuOpen(prev => !prev)}
-                title="Toggle documents"
-                className={`p-2 rounded-lg transition-colors
-                  ${docsMenuOpen
-                    ? 'bg-purple-500/40 text-purple-200'
-                    : 'text-purple-400 hover:bg-purple-500/20'
-                  }`}
-              >
-                <ChevronUp
-                  size={16}
-                  className={`transition-transform ${docsMenuOpen ? 'rotate-180' : ''}`}
-                />
-              </button>
-            )}
-
             {/* Send button */}
             <motion.button
               whileHover={{ scale: 1.05 }}
@@ -408,7 +323,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsR
           Press Enter to search
           {uploadedDocs.length > 0 && (
             <span className="ml-2">
-              · {uploadedDocs.filter(d => d.enabled).length}/{uploadedDocs.length} docs active
+              · {uploadedDocs.filter(d => d.enabled).length}/{uploadedDocs.length} docs active · manage in Settings
             </span>
           )}
         </p>

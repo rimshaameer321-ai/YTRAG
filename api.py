@@ -1,7 +1,10 @@
 # api.py
 # Main FastAPI backend.
 # NEW: /search now accepts chat_history so the AI has conversation context.
-# NEW: documents can be enabled/disabled per query via enabled_document_ids.
+# CHANGED: Document enable/disable is now a GLOBAL setting per document
+#          (stored in Supabase), controlled from the Settings panel.
+#          /search no longer needs enabled_document_ids from the frontend —
+#          it looks up which documents are enabled itself.
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file so OPENAI_KEY, SUPABASE_URL etc. are available
@@ -51,39 +54,76 @@ class SearchRequest(BaseModel):
     Body of the POST /search request.
     query: the current question being asked
     top_k: how many document chunks to retrieve from FAISS (default 5)
-    chat_history: list of previous messages — NEW, used for context
-    enabled_document_ids: if provided, search ONLY these documents — NEW
+    chat_history: list of previous messages — used for context
+    enabled_document_ids: CHANGED — now optional/legacy. If the frontend sends
+        it, it's still respected (e.g. for future per-chat overrides). If not
+        sent, the backend looks up the user's globally-enabled documents
+        from Supabase instead.
     """
     query: str
     top_k: int = 5
-    chat_history: List[ChatMessage] = []           # NEW: previous messages (default empty list)
-    enabled_document_ids: Optional[List[str]] = None  # NEW: None means use all documents
+    chat_history: List[ChatMessage] = []
+    enabled_document_ids: Optional[List[str]] = None  # CHANGED: now a fallback override, not the primary source
+
+
+class ToggleDocumentRequest(BaseModel):
+    """Body of the PATCH /documents/{document_id} request — flips global enabled state."""
+    enabled: bool
 
 
 # --- Single RAGSearch instance shared across all requests ---
 rag = RAGSearch()
 
 
+def _get_globally_enabled_document_ids(user_supabase: Client, user_id: str) -> List[str]:
+    """
+    NEW: Fetch the IDs of all documents this user has marked as enabled=True.
+    Used by /search when the frontend doesn't explicitly override the filter,
+    so document visibility is controlled centrally from the Settings panel
+    rather than per-chat.
+    """
+    response = (
+        user_supabase.table("documents")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("enabled", True)
+        .execute()
+    )
+    return [row["id"] for row in response.data]
+
+
 @app.post("/search")
-async def search(req: SearchRequest, user=Depends(get_current_user)):
+async def search(
+    req: SearchRequest,
+    user=Depends(get_current_user),
+    user_supabase: Client = Depends(get_supabase_for_user),  # NEW: needed to look up enabled docs
+):
     """
     Main search endpoint.
-    - Receives the query + chat history + optional document filter
+    - Receives the query + chat history
+    - CHANGED: Determines which documents to search using the GLOBAL
+      enabled/disabled setting (from Settings), unless the request
+      explicitly overrides it with enabled_document_ids.
     - Searches FAISS for relevant document chunks
     - Sends everything to the AI with full context
     - Returns the AI's answer
     """
     try:
         # Convert Pydantic ChatMessage objects to plain dicts for the search function
-        # e.g. [{"role": "user", "content": "What is X?"}, {"role": "assistant", "content": "X is..."}]
         history_dicts = [{"role": m.role, "content": m.content} for m in req.chat_history]
+
+        # CHANGED: if the frontend didn't explicitly pass a filter, use the
+        # user's globally-enabled documents (controlled from Settings).
+        enabled_ids = req.enabled_document_ids
+        if enabled_ids is None:
+            enabled_ids = _get_globally_enabled_document_ids(user_supabase, user.id)
 
         summary = rag.search_and_summarize(
             query=req.query,
             top_k=req.top_k,
             user_id=user.id,
-            chat_history=history_dicts,                   # NEW: pass history to RAGSearch
-            enabled_document_ids=req.enabled_document_ids  # NEW: pass document filter to RAGSearch
+            chat_history=history_dicts,
+            enabled_document_ids=enabled_ids,  # CHANGED: always a concrete list now (global setting applied)
         )
         return {"summary": summary, "documents": []}
     except Exception as e:
@@ -133,12 +173,15 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=f"Failed to index document: {e}")
 
     # Save record in Supabase
+    # CHANGED: enabled=True by default — new uploads are immediately active
+    # for every chat until the user disables them from Settings.
     try:
         user_supabase.table("documents").insert({
             "id": document_id,
             "user_id": user.id,
             "filename": file.filename,
             "storage_path": str(saved_path),
+            "enabled": True,  # NEW: global enabled flag, default on
         }).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save document record: {e}")
@@ -161,6 +204,33 @@ async def list_documents(
         return {"documents": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {e}")
+
+
+@app.patch("/documents/{document_id}")
+async def toggle_document(
+    document_id: str,
+    req: ToggleDocumentRequest,
+    user=Depends(get_current_user),
+    user_supabase: Client = Depends(get_supabase_for_user),
+):
+    """
+    NEW: Globally enable or disable a document. This is the endpoint the
+    Settings panel calls — the change applies everywhere (every chat),
+    not just the current session.
+    """
+    result = (
+        user_supabase.table("documents")
+        .select("id")
+        .eq("id", document_id)
+        .eq("user_id", user.id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Document not found or no permission.")
+
+    user_supabase.table("documents").update({"enabled": req.enabled}).eq("id", document_id).eq("user_id", user.id).execute()
+
+    return {"message": "Document updated successfully.", "enabled": req.enabled}
 
 
 @app.delete("/documents/{document_id}")

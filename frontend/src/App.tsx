@@ -4,12 +4,13 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Trash2, Plus, MessageSquare, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Trash2, Plus, MessageSquare, ChevronLeft, ChevronRight, FileText, Settings } from 'lucide-react';
 import SearchBar, { AttachedDocument } from './components/SearchBar';
 import ResponseDisplay from './components/ResponseDisplay';
 import LoadingAnimation from './components/LoadingAnimation';
 import AuthPage from './AuthPage';
 import DocumentManager from './DocumentManager';
+import SettingsModal from './SettingsModal';
 import ProfileModal, { getDisplayName } from './ProfileModal';
 import { supabase } from './supabaseClient';
 import type { Session } from '@supabase/supabase-js';
@@ -108,6 +109,8 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [isDocManagerOpen, setIsDocManagerOpen] = useState(false);
+  // NEW: Settings panel — global document enable/disable lives here now
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // NEW: jab bhi hub (DocumentManager) se upload/delete ho, yeh number badhta hai —
   // SearchBar isko dependency ke taur pe use karke apni docs list refresh karta hai
   const [docsRefreshKey, setDocsRefreshKey] = useState(0);
@@ -185,10 +188,12 @@ export default function App() {
   };
 
   // --- Search handler ---
+  // CHANGED: enabledDocIds parameter removed — backend now determines which
+  // documents to search based on the global Settings (enabled flag in Supabase),
+  // not a per-chat list passed from the frontend.
   const handleSearch = async (
     searchQuery: string,
-    attachments: AttachedDocument[],
-    enabledDocIds: string[] | null
+    attachments: AttachedDocument[]
   ) => {
     if (!session) return;
 
@@ -226,8 +231,8 @@ export default function App() {
         body: JSON.stringify({
           query: searchQuery,
           top_k: 5,
-          chat_history: chatHistory,           // Purani baatein AI ko do
-          enabled_document_ids: enabledDocIds, // Sirf yeh docs search karo
+          chat_history: chatHistory, // Purani baatein AI ko do
+          // CHANGED: enabled_document_ids ab nahi bhejte — backend Settings se khud check karega
         }),
       });
 
@@ -370,7 +375,25 @@ export default function App() {
               )}
             </div>
 
-            {/* CHANGED: Sidebar footer — ChatGPT jaisa profile section (avatar + naam) */}
+            {/* NEW: Your Docs + Settings — moved here from navbar, sit above the profile footer */}
+            <div className="border-t border-purple-500/20 px-2 py-2 flex flex-col gap-1 shrink-0">
+              <button
+                onClick={() => setIsDocManagerOpen(true)}
+                className="w-full flex items-center gap-3 px-2 py-2 rounded-lg text-sm text-white/80 hover:bg-purple-500/10 transition-colors"
+              >
+                <FileText size={16} className="text-purple-400" />
+                Your Docs
+              </button>
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="w-full flex items-center gap-3 px-2 py-2 rounded-lg text-sm text-white/80 hover:bg-purple-500/10 transition-colors"
+              >
+                <Settings size={16} className="text-purple-400" />
+                Settings
+              </button>
+            </div>
+
+            {/* Sidebar footer — ChatGPT jaisa profile section (avatar + naam) */}
             <button
               onClick={() => setIsProfileOpen(true)}
               className="border-t border-purple-500/20 px-4 py-3 flex items-center gap-3 hover:bg-purple-500/10 transition-colors shrink-0"
@@ -398,14 +421,7 @@ export default function App() {
 
             <p className="text-purple-300 text-sm">AI-Powered Document Search</p>
 
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setIsDocManagerOpen(true)}
-                className="text-sm text-purple-300 border border-purple-500/30 rounded-lg px-3 py-1.5 hover:bg-purple-500/10"
-              >
-                Your Docs
-              </button>
-            </div>
+            <div className="w-9" /> {/* spacer to keep title centered, matches toggle button width */}
           </div>
         </nav>
 
@@ -509,6 +525,11 @@ export default function App() {
       <DocumentManager
         isOpen={isDocManagerOpen}
         onClose={() => setIsDocManagerOpen(false)}
+        onDocumentsChanged={() => setDocsRefreshKey(prev => prev + 1)}
+      />
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
         onDocumentsChanged={() => setDocsRefreshKey(prev => prev + 1)}
       />
       <ProfileModal

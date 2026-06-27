@@ -108,6 +108,9 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [isDocManagerOpen, setIsDocManagerOpen] = useState(false);
+  // NEW: jab bhi hub (DocumentManager) se upload/delete ho, yeh number badhta hai —
+  // SearchBar isko dependency ke taur pe use karke apni docs list refresh karta hai
+  const [docsRefreshKey, setDocsRefreshKey] = useState(0);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -498,12 +501,16 @@ export default function App() {
 
         <div className="border-t border-purple-500/20 bg-slate-900/30 backdrop-blur-sm px-4 py-4">
           <div className="max-w-3xl mx-auto">
-            <SearchBar onSearch={handleSearch} disabled={loading} />
+            <SearchBar onSearch={handleSearch} disabled={loading} docsRefreshKey={docsRefreshKey} />
           </div>
         </div>
       </div>
 
-      <DocumentManager isOpen={isDocManagerOpen} onClose={() => setIsDocManagerOpen(false)} />
+      <DocumentManager
+        isOpen={isDocManagerOpen}
+        onClose={() => setIsDocManagerOpen(false)}
+        onDocumentsChanged={() => setDocsRefreshKey(prev => prev + 1)}
+      />
       <ProfileModal
         isOpen={isProfileOpen}
         onClose={() => setIsProfileOpen(false)}

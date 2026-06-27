@@ -29,9 +29,11 @@ interface SearchBarProps {
   ) => void;
   disabled: boolean;
   onDocumentDeleted?: (documentId: string) => void;
+  // NEW: jab yeh value badalti hai (hub se upload/delete hone par), docs list refresh hoti hai
+  docsRefreshKey?: number;
 }
 
-export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: SearchBarProps) {
+export default function SearchBar({ onSearch, disabled, onDocumentDeleted, docsRefreshKey }: SearchBarProps) {
   const [query, setQuery] = useState('');
   // CHANGED: ab ek se zyada staged attachments rakh sakte hain (grid cards mein dikhte hain)
   const [attachments, setAttachments] = useState<AttachedDocument[]>([]);
@@ -53,7 +55,10 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     return { Authorization: `Bearer ${token}` };
   };
 
-  // NEW: Fetch all uploaded documents for this user on component mount
+  // NEW: Fetch all uploaded documents for this user — re-run on mount AND
+  // whenever docsRefreshKey changes (i.e. user uploaded/deleted from the hub).
+  // CHANGED: existing toggle states (enabled/disabled) are preserved across
+  // refreshes — only newly-added docs default to enabled, and removed docs drop out.
   useEffect(() => {
     const fetchDocs = async () => {
       try {
@@ -61,20 +66,20 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
         const res = await fetch(`${apiUrl}/documents`, { headers });  // GET /documents
         if (!res.ok) return;
         const data = await res.json();
-        // Map the backend response to UploadedDoc shape, all enabled by default
-        setUploadedDocs(
-          (data.documents ?? []).map((d: any) => ({
+        setUploadedDocs(prev => {
+          const prevById = new Map(prev.map(d => [d.id, d]));
+          return (data.documents ?? []).map((d: any) => ({
             id: d.id,
             filename: d.filename,
-            enabled: true,  // All docs start as enabled
-          }))
-        );
+            enabled: prevById.get(d.id)?.enabled ?? true, // purana toggle state rakho, naya default enabled
+          }));
+        });
       } catch {
         // Silently ignore — user just won't see the doc toggle panel
       }
     };
     fetchDocs();
-  }, []); // Empty array = run once on mount
+  }, [docsRefreshKey]); // mount par bhi chalega (undefined -> defined) aur jab hub se docs badlen
 
   // NEW: Toggle a document's enabled/disabled state
   const toggleDoc = (docId: string) => {

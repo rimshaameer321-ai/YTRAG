@@ -1,14 +1,16 @@
 // DocumentManager.tsx
-// Purpose: Modal component that shows the logged-in user's uploaded
-// documents and lets them permanently delete any of them. Deleting a
-// document removes its chunks from the FAISS vector store, removes its
-// record from Supabase, and deletes the file from disk — once deleted,
-// the user will no longer be able to search within that document.
-// (Uploading happens separately via the "+" button in SearchBar.)
+// Purpose: Main document hub — the central place to upload, view, and
+// delete the logged-in user's documents.
+// NEW: Upload button added here so this panel is the primary place to
+//      manage documents (uploading inside individual chats via SearchBar
+//      still works too — both write to the same backend document list).
+// Deleting a document removes its chunks from the FAISS vector store,
+// removes its record from Supabase, and deletes the file from disk —
+// once deleted, the user will no longer be able to search within it.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FileText, Trash2 } from 'lucide-react';
+import { FileText, Trash2, Plus, Upload } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 interface DocumentRecord {
@@ -20,13 +22,21 @@ interface DocumentRecord {
 interface DocumentManagerProps {
   isOpen: boolean;
   onClose: () => void;
+  // NEW: parent (App.tsx) ko batane ke liye ke documents list badal gayi hai,
+  // taake open chats ke andar SearchBar ki doc-toggle list bhi refresh ho sake
+  onDocumentsChanged?: () => void;
 }
 
-export default function DocumentManager({ isOpen, onClose }: DocumentManagerProps) {
+export default function DocumentManager({ isOpen, onClose, onDocumentsChanged }: DocumentManagerProps) {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState('');
+
+  // NEW: upload-related state — same pattern used in SearchBar.tsx
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
@@ -61,6 +71,82 @@ export default function DocumentManager({ isOpen, onClose }: DocumentManagerProp
     }
   }, [isOpen]);
 
+  // NEW: open the native file picker
+  const handlePlusClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  // NEW: upload a single file to the backend, returns the new doc record
+  const uploadSingleFile = async (file: File): Promise<DocumentRecord> => {
+    const headers = await getAuthHeader();
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const res = await fetch(`${apiUrl}/upload`, {
+      method: 'POST',
+      headers, // Content-Type set automatically by the browser for FormData
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Upload failed for ${file.name}.`);
+    }
+
+    const data = await res.json();
+    return {
+      id: data.document_id,
+      filename: data.filename,
+      created_at: new Date().toISOString(),
+    };
+  };
+
+  // NEW: handle one or many files selected from the picker — uploads them
+  // one-by-one in sequence, same approach as SearchBar.tsx, so multiple
+  // files don't overwrite each other and all end up in the list.
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    if (uploading) return;
+
+    const fileList = Array.from(files);
+
+    setUploading(true);
+    setError('');
+    setUploadProgress({ done: 0, total: fileList.length });
+
+    const newlyUploaded: DocumentRecord[] = [];
+    const failedNames: string[] = [];
+
+    for (let i = 0; i < fileList.length; i++) {
+      try {
+        const doc = await uploadSingleFile(fileList[i]);
+        newlyUploaded.push(doc);
+      } catch {
+        failedNames.push(fileList[i].name);
+      } finally {
+        setUploadProgress({ done: i + 1, total: fileList.length });
+      }
+    }
+
+    if (newlyUploaded.length > 0) {
+      setDocuments(prev => [...prev, ...newlyUploaded]);
+      onDocumentsChanged?.(); // Open chats ko batao ke list badal gayi
+    }
+
+    if (failedNames.length > 0) {
+      setError(
+        failedNames.length === 1
+          ? `Upload failed for ${failedNames[0]}.`
+          : `${failedNames.length} files failed to upload.`
+      );
+    }
+
+    setUploading(false);
+    setUploadProgress(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   // Permanently deletes a document: removes it from the FAISS vector
   // store, the Supabase 'documents' table, and disk. After this, the
   // document's content can no longer be searched.
@@ -82,6 +168,7 @@ export default function DocumentManager({ isOpen, onClose }: DocumentManagerProp
 
       // Remove it from the local list immediately
       setDocuments(prev => prev.filter(doc => doc.id !== documentId));
+      onDocumentsChanged?.(); // Open chats ko batao ke list badal gayi
     } catch (err: any) {
       setError(err.message || 'Delete failed.');
     } finally {
@@ -118,8 +205,38 @@ export default function DocumentManager({ isOpen, onClose }: DocumentManagerProp
             </div>
 
             <p className="text-purple-300/70 text-xs mb-4">
-              You can delete a document at any time.
+              Upload documents here to use them across any chat. You can delete a document at any time.
             </p>
+
+            {/* NEW: Upload button + hidden file input — this is the hub's upload entry point */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.txt,.csv,.xlsx,.docx,.json"
+              multiple
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={handlePlusClick}
+              disabled={uploading}
+              className="mb-4 flex items-center justify-center gap-2 w-full border-2 border-dashed border-purple-500/30 rounded-xl py-3 text-purple-300 hover:border-purple-400/60 hover:bg-purple-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
+            >
+              {uploading ? (
+                <>
+                  <Upload size={16} className="animate-pulse" />
+                  {uploadProgress && uploadProgress.total > 1
+                    ? `Uploading ${uploadProgress.done}/${uploadProgress.total}...`
+                    : 'Uploading...'}
+                </>
+              ) : (
+                <>
+                  <Plus size={16} />
+                  Upload documents
+                </>
+              )}
+            </button>
 
             {/* Error message */}
             {error && (

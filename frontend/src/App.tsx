@@ -4,7 +4,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FileText, Trash2, Plus, MessageSquare, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Trash2, Plus, MessageSquare, ChevronLeft, ChevronRight } from 'lucide-react';
 import SearchBar, { AttachedDocument } from './components/SearchBar';
 import ResponseDisplay from './components/ResponseDisplay';
 import LoadingAnimation from './components/LoadingAnimation';
@@ -20,7 +20,7 @@ interface Message {
   role: 'user' | 'assistant'; // "user" = insaan, "assistant" = AI
   query: string;               // User ka sawal
   response: string;            // AI ka jawab
-  attachment: AttachedDocument | null; // Optional attached document
+  attachments: AttachedDocument[]; // CHANGED: ab ek se zyada attached documents ho sakte hain
 }
 
 interface Chat {
@@ -184,7 +184,7 @@ export default function App() {
   // --- Search handler ---
   const handleSearch = async (
     searchQuery: string,
-    attachment: AttachedDocument | null,
+    attachments: AttachedDocument[],
     enabledDocIds: string[] | null
   ) => {
     if (!session) return;
@@ -235,7 +235,7 @@ export default function App() {
         role: 'user',
         query: searchQuery,
         response: data.summary,
-        attachment,
+        attachments, // CHANGED: ab array store hota hai
       };
 
       setChats(prev => prev.map(chat => {
@@ -275,11 +275,11 @@ export default function App() {
       setChats(prev => prev.map(chat => {
         const updatedChat = {
           ...chat,
-          messages: chat.messages.map(msg =>
-            msg.attachment?.document_id === documentId
-              ? { ...msg, attachment: null }
-              : msg
-          ),
+          // CHANGED: ab specific attachment ko array se filter karke nikalte hain
+          messages: chat.messages.map(msg => ({
+            ...msg,
+            attachments: msg.attachments.filter(a => a.document_id !== documentId),
+          })),
         };
         updateChatInSupabase(updatedChat);
         return updatedChat;
@@ -436,21 +436,34 @@ export default function App() {
                   {/* CHANGED: User ka sawal ab right side pe — chat bubble jaisa */}
                   <div className="flex justify-end mb-4">
                     <div className="border border-purple-500/40 rounded-xl px-4 py-3 bg-purple-500/10 max-w-[80%]">
-                      <p className="text-sm text-white text-right">{msg.query}</p>
-                      {msg.attachment && (
-                        <div className="inline-flex items-center gap-2 bg-slate-800/60 border border-purple-500/30 rounded-lg px-3 py-1.5 group relative mt-2">
-                          <FileText size={14} className="text-purple-300" />
-                          <span className="text-xs text-white max-w-[160px] truncate">
-                            {msg.attachment.filename}
-                          </span>
-                          <button
-                            onClick={() => handleDeleteAttachment(msg.attachment!.document_id)}
-                            className="opacity-0 group-hover:opacity-100 text-red-300 hover:text-red-400 transition-opacity ml-1"
-                          >
-                            <Trash2 size={13} />
-                          </button>
+                      {/* CHANGED: Saare attached documents grid cards mein dikhte hain */}
+                      {msg.attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 justify-end mb-2">
+                          {msg.attachments.map(att => {
+                            const ext = att.filename.split('.').pop()?.toUpperCase() || 'FILE';
+                            return (
+                              <div
+                                key={att.document_id}
+                                className="relative group w-32 bg-slate-800/60 border border-purple-500/30 rounded-lg p-2.5 flex flex-col justify-between text-left"
+                              >
+                                <span className="text-xs text-white leading-snug line-clamp-3 break-words mb-1.5">
+                                  {att.filename}
+                                </span>
+                                <span className="text-[10px] font-semibold text-purple-300 bg-purple-500/15 border border-purple-500/30 rounded px-1.5 py-0.5 w-fit">
+                                  {ext}
+                                </span>
+                                <button
+                                  onClick={() => handleDeleteAttachment(att.document_id)}
+                                  className="absolute -top-2 -right-2 w-5 h-5 bg-slate-700 border border-purple-500/40 rounded-full flex items-center justify-center text-red-300 opacity-0 group-hover:opacity-100 hover:bg-red-500/80 hover:text-white transition-all"
+                                >
+                                  <Trash2 size={11} />
+                                </button>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
+                      <p className="text-sm text-white text-right">{msg.query}</p>
                     </div>
                   </div>
                   <ResponseDisplay markdown={msg.response} />

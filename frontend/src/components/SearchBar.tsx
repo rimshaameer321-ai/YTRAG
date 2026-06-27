@@ -24,7 +24,7 @@ interface UploadedDoc {
 interface SearchBarProps {
   onSearch: (
     query: string,
-    attachment: AttachedDocument | null,
+    attachments: AttachedDocument[],
     enabledDocIds: string[] | null  // NEW: null means "use all docs"
   ) => void;
   disabled: boolean;
@@ -33,8 +33,8 @@ interface SearchBarProps {
 
 export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: SearchBarProps) {
   const [query, setQuery] = useState('');
-  // CHANGED: ab sirf last uploaded document attachment preview ke liye, baaki sab uploadedDocs mein
-  const [attachment, setAttachment] = useState<AttachedDocument | null>(null);
+  // CHANGED: ab ek se zyada staged attachments rakh sakte hain (grid cards mein dikhte hain)
+  const [attachments, setAttachments] = useState<AttachedDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   // CHANGED: kitni files total/kitni ho chuki hain, "Uploading 2/5..." jaisa dikhane ke liye
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
@@ -153,9 +153,11 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     // Saari successful uploads ko docs list mein add karo
     if (newlyUploaded.length > 0) {
       setUploadedDocs(prev => [...prev, ...newlyUploaded]);
-      // Sabse aakhri successful upload ko inline attachment preview ke taur pe dikhao
-      const last = newlyUploaded[newlyUploaded.length - 1];
-      setAttachment({ document_id: last.id, filename: last.filename });
+      // CHANGED: har successful upload ko staged attachments list mein add karo (overwrite nahi)
+      setAttachments(prev => [
+        ...prev,
+        ...newlyUploaded.map(d => ({ document_id: d.id, filename: d.filename })),
+      ]);
     }
 
     if (failedNames.length > 0) {
@@ -171,11 +173,9 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     if (fileInputRef.current) fileInputRef.current.value = '';  // Reset file input
   };
 
-  // Delete the attached document from backend + clear from UI
-  const handleRemoveAttachment = async () => {
-    if (!attachment) return;
-    const documentId = attachment.document_id;
-
+  // Delete a specific attached document from backend + clear from UI
+  // CHANGED: ab documentId parameter leta hai (pehle sirf ek attachment tha)
+  const handleRemoveAttachment = async (documentId: string) => {
     try {
       const headers = await getAuthHeader();
       await fetch(`${apiUrl}/documents/${documentId}`, {
@@ -185,7 +185,7 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     } catch {
       // Even if server delete fails, clear from UI so user isn't stuck
     } finally {
-      setAttachment(null);
+      setAttachments(prev => prev.filter(a => a.document_id !== documentId));
       onDocumentDeleted?.(documentId);  // Notify parent (App.tsx) to clean up messages
       // NEW: Also remove from the docs toggle list
       setUploadedDocs(prev => prev.filter(d => d.id !== documentId));
@@ -196,9 +196,9 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();  // Prevent default form submission (page reload)
     if (query.trim()) {
-      onSearch(query.trim(), attachment, getEnabledDocIds());  // NEW: pass enabled doc IDs
+      onSearch(query.trim(), attachments, getEnabledDocIds());  // CHANGED: pass full attachments array
       setQuery('');
-      setAttachment(null);
+      setAttachments([]);
     }
   };
 
@@ -207,9 +207,9 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (query.trim()) {
-        onSearch(query.trim(), attachment, getEnabledDocIds());  // NEW: pass enabled doc IDs
+        onSearch(query.trim(), attachments, getEnabledDocIds());  // CHANGED: pass full attachments array
         setQuery('');
-        setAttachment(null);
+        setAttachments([]);
       }
     }
   };
@@ -259,35 +259,51 @@ export default function SearchBar({ onSearch, disabled, onDocumentDeleted }: Sea
         )}
       </AnimatePresence>
 
-      {/* Attachment preview */}
+      {/* Attachment preview — CHANGED: ab grid cards mein, ek se zyada files dikhati hain */}
       <AnimatePresence>
-        {(attachment || uploading) && (
+        {(attachments.length > 0 || uploading) && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
-            className="mb-2 inline-flex items-center gap-2 bg-slate-800/60 border border-purple-500/30 rounded-xl px-3 py-2 relative group"
+            className="mb-3 flex flex-wrap gap-2"
           >
-            <div className="w-9 h-9 bg-purple-500/20 rounded-lg flex items-center justify-center shrink-0">
-              <FileText size={16} className="text-purple-300" />
-            </div>
-            <span className="text-sm text-white max-w-[180px] truncate">
-              {uploading
-                ? (uploadProgress && uploadProgress.total > 1
-                    ? `Uploading ${uploadProgress.done}/${uploadProgress.total}...`
-                    : 'Uploading...')
-                : attachment?.filename}
-            </span>
+            {/* Har staged file ka apna card — filename + extension badge */}
+            {attachments.map(doc => {
+              const ext = doc.filename.split('.').pop()?.toUpperCase() || 'FILE';
+              return (
+                <div
+                  key={doc.document_id}
+                  className="relative group w-36 bg-slate-800/60 border border-purple-500/30 rounded-xl p-3 flex flex-col justify-between"
+                >
+                  <span className="text-xs text-white leading-snug line-clamp-3 break-words mb-2">
+                    {doc.filename}
+                  </span>
+                  <span className="text-[10px] font-semibold text-purple-300 bg-purple-500/15 border border-purple-500/30 rounded px-1.5 py-0.5 w-fit">
+                    {ext}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveAttachment(doc.document_id)}
+                    className="absolute -top-2 -right-2 w-5 h-5 bg-slate-700 border border-purple-500/40 rounded-full flex items-center justify-center text-purple-300 opacity-0 group-hover:opacity-100 hover:bg-red-500/80 hover:text-white transition-all"
+                    aria-label="Remove document"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              );
+            })}
 
-            {!uploading && (
-              <button
-                type="button"
-                onClick={handleRemoveAttachment}
-                className="absolute -top-2 -right-2 w-5 h-5 bg-slate-700 border border-purple-500/40 rounded-full flex items-center justify-center text-purple-300 hover:bg-red-500/80 hover:text-white transition-colors"
-                aria-label="Remove document"
-              >
-                <X size={12} />
-              </button>
+            {/* Uploading placeholder card — sirf jab files upload ho rahi hon */}
+            {uploading && (
+              <div className="w-36 bg-slate-800/60 border border-purple-500/30 rounded-xl p-3 flex flex-col items-center justify-center gap-1">
+                <FileText size={16} className="text-purple-300" />
+                <span className="text-xs text-purple-300">
+                  {uploadProgress && uploadProgress.total > 1
+                    ? `Uploading ${uploadProgress.done}/${uploadProgress.total}...`
+                    : 'Uploading...'}
+                </span>
+              </div>
             )}
           </motion.div>
         )}

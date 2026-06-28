@@ -343,7 +343,12 @@ export default function App() {
   const avatarLetter = displayName.charAt(0).toUpperCase();
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-slate-900 flex">
+    // CHANGED: h-screen + overflow-hidden (instead of min-h-screen) locks the
+    // whole layout to the viewport height. Without this, long chats grew the
+    // page taller than the screen, creating a page-level scroll that dragged
+    // the sidebar along with it. Now only <main> below scrolls internally —
+    // the sidebar stays fixed, like Claude's own layout.
+    <div className="h-screen overflow-hidden bg-gradient-to-br from-gray-950 via-gray-900 to-slate-900 flex">
 
       {/* ====== SIDEBAR ====== */}
       <AnimatePresence>

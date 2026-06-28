@@ -33,6 +33,34 @@ interface Chat {
 
 // --- Supabase Chat Helpers ---
 
+/**
+ * NEW: Purane format ke messages ko naye format mein convert karo.
+ * Pehle har message mein `attachment` (single, ya null) hota tha.
+ * Ab `attachments` (array) hota hai. Purane saved chats abhi bhi
+ * Supabase mein purane format mein pade hain — yeh function unhe
+ * safely naye format mein normalize karta hai taake .map()/.length
+ * crash na karein.
+ */
+function normalizeMessage(raw: any): Message {
+  let attachments: AttachedDocument[] = [];
+
+  if (Array.isArray(raw?.attachments)) {
+    // Already naya format hai
+    attachments = raw.attachments;
+  } else if (raw?.attachment) {
+    // Purana format: single object — array mein wrap karo
+    attachments = [raw.attachment];
+  }
+  // Agar koi bhi field nahi hai (na attachments na attachment), attachments = []
+
+  return {
+    role: raw?.role === 'assistant' ? 'assistant' : 'user',
+    query: raw?.query ?? '',
+    response: raw?.response ?? '',
+    attachments,
+  };
+}
+
 /** Login ke baad is user ke saare chats fetch karo Supabase se */
 async function fetchChatsFromSupabase(): Promise<Chat[]> {
   const { data, error } = await supabase
@@ -46,7 +74,9 @@ async function fetchChatsFromSupabase(): Promise<Chat[]> {
   return data.map((row: any) => ({
     id: row.id,
     title: row.title,
-    messages: row.messages ?? [],                  // jsonb column — already parsed
+    // CHANGED: har message ko normalize karo — purane "attachment" format
+    // wale chats bhi bina crash hue load ho jayenge
+    messages: (row.messages ?? []).map(normalizeMessage),
     createdAt: new Date(row.created_at).getTime(), // string ko number mein badlo
   }));
 }
@@ -286,7 +316,7 @@ export default function App() {
           // CHANGED: ab specific attachment ko array se filter karke nikalte hain
           messages: chat.messages.map(msg => ({
             ...msg,
-            attachments: msg.attachments.filter(a => a.document_id !== documentId),
+            attachments: (msg.attachments ?? []).filter(a => a.document_id !== documentId),
           })),
         };
         updateChatInSupabase(updatedChat);
@@ -456,9 +486,9 @@ export default function App() {
                   <div className="flex justify-end mb-4">
                     <div className="border border-purple-500/40 rounded-xl px-4 py-3 bg-purple-500/10 max-w-[80%]">
                       {/* CHANGED: Saare attached documents grid cards mein dikhte hain */}
-                      {msg.attachments.length > 0 && (
+                      {(msg.attachments ?? []).length > 0 && (
                         <div className="flex flex-wrap gap-2 justify-end mb-2">
-                          {msg.attachments.map(att => {
+                          {(msg.attachments ?? []).map(att => {
                             const ext = att.filename.split('.').pop()?.toUpperCase() || 'FILE';
                             return (
                               <div

@@ -86,13 +86,19 @@ class RAGSearch:
         texts = [r["metadata"].get("text", "") for r in results if r["metadata"]]
         context = "\n\n".join(texts)
 
-        # CHANGED: pehle yahan empty context pe seedha "No relevant documents
-        # found" return ho jata tha — matlab koi bhi general/basic sawal
-        # (jaise "hi", "what is 2+2") ka jawab kabhi nahi milta tha.
-        # Ab context empty ho ya na ho, hum hamesha AI ko call karte hain —
-        # bas prompt mein AI ko batate hain ke documents available hain ya
-        # nahi, aur usi ke mutabiq decide karne dete hain.
-        has_context = bool(context.strip())
+        # CHANGED: General knowledge wala fallback hata diya — ab sirf
+        # GREETINGS (hi/hello/salam/etc.) ka chhota friendly reply milta hai,
+        # bina AI call kiye (simple, reliable rule-check). Har doosra sawal
+        # phir se strictly documents se hi answer hota hai, jaisa pehle tha.
+        greeting_reply = self._maybe_greeting_reply(query)
+        if greeting_reply:
+            return greeting_reply
+
+        if not context.strip():
+            # Koi relevant chunk nahi mila — yeh tab hoga jab:
+            # - Saare docs disabled hain
+            # - Ya query se koi match nahi
+            return "No relevant documents found. Please enable some documents or upload new ones."
 
         # Chat history ko readable string mein badlo
         history_text = ""
@@ -105,46 +111,87 @@ class RAGSearch:
                 history_lines.append(f"{label}: {content}")
             history_text = "\n".join(history_lines)
 
-        # CHANGED: naya hybrid prompt — agar relevant document context mile
-        # to usi se answer do (jaisa pehle tha), warna apne general knowledge
-        # se ek normal, helpful jawab do (jaise koi normal AI assistant deta).
         # NEW: AI ko hamesha English mein jawab dene ka explicit instruction —
         # chahe user kisi bhi language (Urdu, Roman Urdu, etc.) mein poochay.
-        history_block = f"\n\nPrevious conversation (for context only — do not answer these again):\n{history_text}" if history_text else ""
         language_instruction = "Always respond in English only, regardless of the language the question is asked in."
 
-        if has_context:
-            prompt = f"""You are a helpful assistant with access to documents the user has uploaded.
+        # AI ke liye prompt banao — strictly documents se hi answer do
+        if history_text:
+            prompt = f"""You are answering ONLY using the context below, which comes from documents the user has uploaded. Do not use any outside knowledge.
 
-Below is context retrieved from the user's documents that may be relevant to their question. If this context answers the question, base your answer primarily on it. If the context is only partially relevant, you may combine it with your own general knowledge to give a complete, helpful answer. If the context is not relevant to the question at all, ignore it and just answer normally using your own knowledge.
+If the context does not contain information relevant to the query, respond with exactly: "I couldn't find anything about that in your documents."
 
-{language_instruction}{history_block}
+{language_instruction}
+
+Previous conversation (for context only — do not answer these again):
+{history_text}
 
 Context from documents:
 {context}
 
 Current question: '{query}'
 
-Answer:"""
+Answer (based only on the document context above, keeping previous conversation in mind):"""
         else:
-            # Koi document chunk match nahi hua (ya saare docs disabled hain,
-            # ya sawal documents se related hi nahi tha) — phir bhi normal
-            # AI assistant ki tarah jawab do, basic/general sawalon ka jawab
-            # zaroor milna chahiye.
-            # CHANGED: extra instructions for tone — casual messages (e.g.
-            # "hi", "hy", "thanks") should get a short, natural, casual
-            # reply, not a long formal explanation.
-            prompt = f"""You are a helpful, friendly assistant having a normal conversation. Reply naturally and conversationally — keep greetings and small talk short and casual, and only go into detail when the question actually calls for it.
+            prompt = f"""You are answering ONLY using the context below, which comes from documents the user has uploaded. Do not use any outside knowledge.
 
-{language_instruction}{history_block}
+If the context does not contain information relevant to the query, respond with exactly: "I couldn't find anything about that in your documents."
 
-Current message: '{query}'
+{language_instruction}
 
-Reply:"""
+Context:
+{context}
+
+Query: '{query}'
+
+Answer (based only on the context above):"""
 
         # Groq LLM ko prompt bhejo
         response = self.llm.invoke([prompt])
         return response.content
+
+    @staticmethod
+    def _maybe_greeting_reply(query: str) -> Optional[str]:
+        """
+        NEW: Agar query sirf ek greeting hai (hi/hello/hy/salam/assalam o
+        alaikum/etc. — kisi bhi spelling variation mein), to ek fixed
+        friendly reply return karo — AI/documents ko bilkul touch nahi
+        karte. Warna None return karo, taake normal document-only flow chale.
+
+        CHANGED: pehle yeh exact-match list thi (e.g. "assalam o alaikum"),
+        jo spelling variations (Alikum/Aleikum/Alaikum, extra spaces, etc.)
+        ko miss kar rahi thi. Ab hum keyword-based check karte hain: agar
+        message chhota hai (max ~4 words) aur usme koi known greeting
+        keyword shamil hai, to greeting treat karte hain. Yeh zyada
+        flexible hai bina false-positives ke (lambe sawalon mein agar
+        "hi" jaisa lafz kahin embed ho bhi jaye, length-limit usse bachata hai).
+        """
+        normalized = query.strip().lower().strip("!.?؟،, ")
+        words = normalized.split()
+
+        if len(words) > 5:
+            # Bohot lamba message — yeh ek real sawal hai, greeting nahi
+            return None
+
+        greeting_words = [
+            "salam", "slam", "assalam", "asalam", "salaam",
+            "hi", "hii", "hiii", "hello", "helo", "hy", "hey", "heya",
+            "aoa", "good morning", "good afternoon", "good evening", "good night",
+        ]
+        acknowledgment_words = [
+            "okay", "ok", "okk", "thanks", "thank you", "thx", "shukriya",
+            "bye", "goodbye", "ok thanks", "alright",
+        ]
+
+        for keyword in greeting_words:
+            if keyword in normalized:
+                return "Hello! How can I help you with your documents today?"
+
+        for keyword in acknowledgment_words:
+            if keyword in normalized:
+                return "You're welcome! Let me know if you have any other questions about your documents."
+
+        return None
 
 
 if __name__ == "__main__":

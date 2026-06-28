@@ -86,11 +86,13 @@ class RAGSearch:
         texts = [r["metadata"].get("text", "") for r in results if r["metadata"]]
         context = "\n\n".join(texts)
 
-        if not context.strip():
-            # Koi relevant chunk nahi mila — yeh tab hoga jab:
-            # - Saare docs disabled hain
-            # - Ya query se koi match nahi
-            return "No relevant documents found. Please enable some documents or upload new ones."
+        # CHANGED: pehle yahan empty context pe seedha "No relevant documents
+        # found" return ho jata tha — matlab koi bhi general/basic sawal
+        # (jaise "hi", "what is 2+2") ka jawab kabhi nahi milta tha.
+        # Ab context empty ho ya na ho, hum hamesha AI ko call karte hain —
+        # bas prompt mein AI ko batate hain ke documents available hain ya
+        # nahi, aur usi ke mutabiq decide karne dete hain.
+        has_context = bool(context.strip())
 
         # Chat history ko readable string mein badlo
         history_text = ""
@@ -103,32 +105,42 @@ class RAGSearch:
                 history_lines.append(f"{label}: {content}")
             history_text = "\n".join(history_lines)
 
-        # AI ke liye prompt banao
-        if history_text:
-            prompt = f"""You are answering ONLY using the context below, which comes from documents the user has uploaded. Do not use any outside knowledge.
+        # CHANGED: naya hybrid prompt — agar relevant document context mile
+        # to usi se answer do (jaisa pehle tha), warna apne general knowledge
+        # se ek normal, helpful jawab do (jaise koi normal AI assistant deta).
+        # NEW: AI ko hamesha English mein jawab dene ka explicit instruction —
+        # chahe user kisi bhi language (Urdu, Roman Urdu, etc.) mein poochay.
+        history_block = f"\n\nPrevious conversation (for context only — do not answer these again):\n{history_text}" if history_text else ""
+        language_instruction = "Always respond in English only, regardless of the language the question is asked in."
 
-If the context does not contain information relevant to the query, respond with exactly: "I couldn't find anything about that in your documents."
+        if has_context:
+            prompt = f"""You are a helpful assistant with access to documents the user has uploaded.
 
-Previous conversation (for context only — do not answer these again):
-{history_text}
+Below is context retrieved from the user's documents that may be relevant to their question. If this context answers the question, base your answer primarily on it. If the context is only partially relevant, you may combine it with your own general knowledge to give a complete, helpful answer. If the context is not relevant to the question at all, ignore it and just answer normally using your own knowledge.
+
+{language_instruction}{history_block}
 
 Context from documents:
 {context}
 
 Current question: '{query}'
 
-Answer (based only on the document context above, keeping previous conversation in mind):"""
+Answer:"""
         else:
-            prompt = f"""You are answering ONLY using the context below, which comes from documents the user has uploaded. Do not use any outside knowledge.
+            # Koi document chunk match nahi hua (ya saare docs disabled hain,
+            # ya sawal documents se related hi nahi tha) — phir bhi normal
+            # AI assistant ki tarah jawab do, basic/general sawalon ka jawab
+            # zaroor milna chahiye.
+            # CHANGED: extra instructions for tone — casual messages (e.g.
+            # "hi", "hy", "thanks") should get a short, natural, casual
+            # reply, not a long formal explanation.
+            prompt = f"""You are a helpful, friendly assistant having a normal conversation. Reply naturally and conversationally — keep greetings and small talk short and casual, and only go into detail when the question actually calls for it.
 
-If the context does not contain information relevant to the query, respond with exactly: "I couldn't find anything about that in your documents."
+{language_instruction}{history_block}
 
-Context:
-{context}
+Current message: '{query}'
 
-Query: '{query}'
-
-Answer (based only on the context above):"""
+Reply:"""
 
         # Groq LLM ko prompt bhejo
         response = self.llm.invoke([prompt])

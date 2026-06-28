@@ -172,14 +172,14 @@ export default function App() {
   }, []);
 
   // --- Login hone ke baad Supabase se chats load karo ---
+  // CHANGED: Login pe ab koi chat automatically open nahi hoti — sidebar mein
+  // purani chats list dikhti hain, lekin user khud koi chat select kare,
+  // tab tak "Ask Your Documents" wala fresh/blank screen hi dikhega.
   useEffect(() => {
     if (!session) return; // Login nahi hai toh kuch mat karo
 
     fetchChatsFromSupabase().then(loadedChats => {
-      setChats(loadedChats); // Supabase se aaye chats state mein set karo
-      if (loadedChats.length > 0) {
-        setActiveChatId(loadedChats[0].id); // Latest chat ko active karo
-      }
+      setChats(loadedChats); // Supabase se aaye chats state mein set karo — activeChatId ko yahan touch nahi karte
     });
   }, [session]); // session change hone pe chalega (login ke waqt)
 

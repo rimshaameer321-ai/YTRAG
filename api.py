@@ -118,6 +118,9 @@ async def search(
         if enabled_ids is None:
             enabled_ids = _get_globally_enabled_document_ids(user_supabase, user.id)
 
+        # DEBUG: dikhao backend ko kya mila — isse pata chalega masla kahan hai
+        print(f"[DEBUG] /search: user={user.id} req.enabled_document_ids={req.enabled_document_ids} resolved_enabled_ids={enabled_ids}")
+
         summary = rag.search_and_summarize(
             query=req.query,
             top_k=req.top_k,

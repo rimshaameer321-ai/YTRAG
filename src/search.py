@@ -1,6 +1,9 @@
 # search.py
 # NEW: enabled_document_ids ab vectorstore.query() ko directly pass hota hai
 # taake FAISS filter pehle lage — baad mein nahi.
+# CHANGED: Startup pe vector store ab Supabase (document_chunks table) se
+# rebuild hota hai — yeh fix karta hai Railway jaisi ephemeral-disk
+# environments ka masla, jahan local FAISS files restart pe gayab ho jaati thi.
 
 import os
 from dotenv import load_dotenv
@@ -19,15 +22,25 @@ class RAGSearch:
     ):
         self.vectorstore = FaissVectorStore(persist_dir, embedding_model)
 
-        faiss_path = os.path.join(persist_dir, "faiss.index")
-        meta_path = os.path.join(persist_dir, "metadata.pkl")
+        # CHANGED: pehle Supabase se try karo (permanent storage, sab users
+        # ke documents). Yeh restart-safe hai — chahe disk ephemeral ho.
+        loaded_from_supabase = False
+        try:
+            loaded_from_supabase = self.vectorstore.build_from_supabase()
+        except Exception as e:
+            print(f"[WARN] Could not load from Supabase: {e}")
 
-        if not (os.path.exists(faiss_path) and os.path.exists(meta_path)):
-            from src.data_loader import load_all_documents
-            docs = load_all_documents("data")
-            self.vectorstore.build_from_documents(docs)
-        else:
-            self.vectorstore.load()
+        if not loaded_from_supabase:
+            # Fallback: local disk cache try karo (agar pehle se exist karta hai)
+            faiss_path = os.path.join(persist_dir, "faiss.index")
+            meta_path = os.path.join(persist_dir, "metadata.pkl")
+            if os.path.exists(faiss_path) and os.path.exists(meta_path):
+                self.vectorstore.load()
+            else:
+                # Aakhri fallback: data/ folder ke default demo documents
+                from src.data_loader import load_all_documents
+                docs = load_all_documents("data")
+                self.vectorstore.build_from_documents(docs)
 
         groq_api_key = os.getenv("GROQ_API_KEY")
         if not groq_api_key:

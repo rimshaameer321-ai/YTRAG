@@ -21,8 +21,9 @@ class FaissVectorStore:
     def build_from_documents(self, documents: List[Any]):
         """
         Local "data/" folder ke documents se FAISS index banao.
-        Yeh sirf local testing ke liye hai — in chunks ka user_id None hota hai
-        isliye yeh per-user search mein nahi aayenge.
+        Yeh sirf local testing/default-docs ke liye hai — in chunks ka
+        user_id None hota hai isliye yeh per-user search mein nahi aayenge,
+        aur yeh Supabase mein bhi save NAHI hote (sirf demo content hai).
         """
         print(f"[INFO] Building vector store from {len(documents)} raw documents...")
         emb_pipe = EmbeddingPipeline(model_name=self.embedding_model, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
@@ -32,6 +33,65 @@ class FaissVectorStore:
         self.add_embeddings(np.array(embeddings).astype('float32'), metadatas)
         self.save()
         print(f"[INFO] Vector store built and saved to {self.persist_dir}")
+
+    def build_from_supabase(self):
+        """
+        NEW: Saare users ke saare document_chunks Supabase (pgvector) se
+        fetch karo aur unse FAISS index memory mein (re)build karo.
+        Yeh Railway jaisi ephemeral-disk environments ke liye zaroori hai —
+        disk pe save kiya FAISS index restart pe gayab ho jata hai, lekin
+        Supabase mein data permanently mehfooz rehta hai.
+        Returns True agar kuch chunks mile aur load ho gaye, warna False.
+        """
+        from auth import get_service_supabase
+
+        print("[INFO] Rebuilding vector store from Supabase document_chunks...")
+        service_client = get_service_supabase()
+
+        # Saare chunks ek sath fetch karo (paginated — Supabase default 1000/page hota hai)
+        all_rows = []
+        page_size = 1000
+        start = 0
+        while True:
+            response = (
+                service_client.table("document_chunks")
+                .select("document_id, user_id, filename, chunk_text, embedding")
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+            rows = response.data or []
+            all_rows.extend(rows)
+            if len(rows) < page_size:
+                break
+            start += page_size
+
+        if not all_rows:
+            print("[INFO] No chunks found in Supabase yet.")
+            return False
+
+        embeddings = []
+        metadatas = []
+        for row in all_rows:
+            # pgvector se aane wala embedding ek list[float] (ya string) ho sakta hai —
+            # dono cases handle karo
+            emb = row["embedding"]
+            if isinstance(emb, str):
+                # Kabhi-kabhi pgvector text format mein aata hai: "[0.1,0.2,...]"
+                emb = [float(x) for x in emb.strip("[]").split(",")]
+            embeddings.append(emb)
+            metadatas.append({
+                "text": row["chunk_text"],
+                "document_id": row["document_id"],
+                "filename": row["filename"],
+                "user_id": row["user_id"],
+            })
+
+        self.index = None  # Fresh start
+        self.metadata = []
+        self.add_embeddings(np.array(embeddings).astype('float32'), metadatas)
+        self.save()  # Local disk pe bhi rakho — agar disk persist hua to fayda, warna no harm
+        print(f"[INFO] Rebuilt vector store from Supabase: {len(all_rows)} chunk(s) loaded.")
+        return True
 
     def add_embeddings(self, embeddings: np.ndarray, metadatas: List[Any] = None):
         """
@@ -48,7 +108,7 @@ class FaissVectorStore:
         print(f"[INFO] Added {embeddings.shape[0]} vectors to Faiss index.")
 
     def save(self):
-        """FAISS index aur metadata disk pe save karo."""
+        """FAISS index aur metadata disk pe save karo (best-effort cache)."""
         faiss_path = os.path.join(self.persist_dir, "faiss.index")
         meta_path = os.path.join(self.persist_dir, "metadata.pkl")
         faiss.write_index(self.index, faiss_path)   # Binary format mein save
@@ -151,8 +211,11 @@ class FaissVectorStore:
         1. Text ko chunks mein todo
         2. Har chunk ka embedding banao
         3. FAISS mein add karo (document_id, filename, user_id ke saath)
+        4. NEW: Har chunk Supabase document_chunks table mein bhi save karo
+           (permanent storage — FAISS sirf in-memory cache hai ab).
         """
         from langchain_core.documents import Document as LangchainDocument
+        from auth import get_service_supabase
 
         print(f"[INFO] Adding document '{filename}' (id={document_id}, user={user_id}) to vector store...")
 
@@ -177,7 +240,29 @@ class FaissVectorStore:
         ]
 
         self.add_embeddings(np.array(embeddings).astype('float32'), metadatas)
-        self.save()  # Disk pe save karo
+        self.save()  # Local disk cache (best-effort)
+
+        # NEW: Supabase mein bhi permanently save karo — yeh hi asal source of truth hai
+        try:
+            service_client = get_service_supabase()
+            rows = [
+                {
+                    "document_id": document_id,
+                    "user_id": user_id,
+                    "filename": filename,
+                    "chunk_text": chunk.page_content,
+                    "embedding": embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+                }
+                for chunk, embedding in zip(chunks, embeddings)
+            ]
+            service_client.table("document_chunks").insert(rows).execute()
+            print(f"[INFO] Saved {len(rows)} chunk(s) to Supabase document_chunks.")
+        except Exception as e:
+            # Agar Supabase save fail ho jaye, FAISS mein to add ho hi gaya hai
+            # (current session ke liye chalega), lekin warning print karo —
+            # restart ke baad yeh document gayab ho jayega.
+            print(f"[WARN] Failed to persist chunks to Supabase: {e}")
+
         print(f"[INFO] Document '{filename}' added with {len(chunks)} chunks.")
 
     def delete_document(self, document_id: str):
@@ -186,16 +271,28 @@ class FaissVectorStore:
         Is document ke saare chunks hataao aur baaki chunks se
         naya FAISS index banao. IndexFlatL2 individual delete support
         nahi karta isliye yeh tarika use karte hain.
+        NEW: Supabase document_chunks se bhi delete karo — yeh asal
+        permanent record hai.
         """
+        from auth import get_service_supabase
+
+        # NEW: Supabase se permanently delete karo (source of truth)
+        try:
+            service_client = get_service_supabase()
+            service_client.table("document_chunks").delete().eq("document_id", document_id).execute()
+            print(f"[INFO] Deleted chunks for document_id={document_id} from Supabase.")
+        except Exception as e:
+            print(f"[WARN] Failed to delete chunks from Supabase: {e}")
+
         if self.index is None or not self.metadata:
-            print("[WARN] Vector store is empty, nothing to delete.")
+            print("[WARN] Vector store is empty, nothing to delete locally.")
             return False
 
         # Sirf woh chunks rakho jinka document_id match nahi karta
         kept_metadata = [m for m in self.metadata if m.get("document_id") != document_id]
 
         if len(kept_metadata) == len(self.metadata):
-            print(f"[WARN] document_id={document_id} not found, nothing was deleted.")
+            print(f"[WARN] document_id={document_id} not found in memory, nothing was deleted locally.")
             return False
 
         if not kept_metadata:
